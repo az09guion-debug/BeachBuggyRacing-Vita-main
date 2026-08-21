@@ -51,8 +51,18 @@
 #include <libc_bridge/libc_bridge.h>
 #endif
 
-#include <SLES/OpenSLES.h>
-#include <SLES/OpenSLES_Android.h>
+#ifndef SLES_OPENSLES_H
+#define SLES_OPENSLES_H
+typedef const void* const* SLObjectItf;
+typedef void* SLEngineItf;
+typedef void* SLPlayItf;
+typedef void* SLVolumeItf;
+typedef void* SLAndroidSimpleBufferQueueItf;
+typedef uint32_t SLuint32;
+typedef int32_t SLresult;
+typedef void* SLInterfaceID;
+#define SL_RESULT_SUCCESS 0
+#endif
 #include <psp2/audioout.h>
 #include <pthread.h>
 
