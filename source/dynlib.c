@@ -13,7 +13,11 @@
  * @brief Resolving dynamic imports of the .so.
  */
 
-#include <psp2/kernel/clib.h>
+#define sceClibPrintf printf
+#define sceClibMemcpy memcpy
+#define sceClibMemset memset
+#define sceClibSnprintf snprintf
+#define sceClibSscanf sscanf
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
