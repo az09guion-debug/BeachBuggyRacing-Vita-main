@@ -1,11 +1,15 @@
 #ifndef __SO_UTIL_H__
 #define __SO_UTIL_H__
 
-#include "elf.h"
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <elf.h>
 
-#include <psp2/types.h>
-
+#ifndef ALIGN_MEM
 #define ALIGN_MEM(x, align) (((x) + ((align) - 1)) & ~((align) - 1))
+#endif
+
 #define MAX_DATA_SEG 4
 
 typedef struct {
@@ -18,7 +22,6 @@ typedef struct {
 typedef struct so_module {
     struct so_module *next;
 
-    SceUID patch_blockid, text_blockid, data_blockid[MAX_DATA_SEG];
     uintptr_t patch_base, patch_head, cave_base, cave_head, text_base, data_base[MAX_DATA_SEG];
     size_t patch_size, cave_size, text_size, data_size[MAX_DATA_SEG];
     int n_data;
@@ -32,7 +35,7 @@ typedef struct so_module {
     Elf32_Rel *reldyn;
     Elf32_Rel *relplt;
 
-    int (** init_array)(void);
+    void (** init_array)(void);
     uint32_t *hash;
 
     int num_dynamic;
@@ -47,7 +50,7 @@ typedef struct so_module {
 } so_module;
 
 typedef struct {
-    char *symbol;
+    const char *symbol;
     uintptr_t func;
 } so_default_dynlib;
 
@@ -66,12 +69,12 @@ void so_initialize(so_module *mod);
 uintptr_t so_symbol(so_module *mod, const char *symbol);
 
 #define SO_CONTINUE(type, h, ...) ({ \
-  kuKernelCpuUnrestrictedMemcpy((void *)h.addr, h.orig_instr, sizeof(h.orig_instr)); \
-  kuKernelFlushCaches((void *)h.addr, sizeof(h.orig_instr)); \
-  type r = h.thumb_addr ? ((type(*)())h.thumb_addr)(__VA_ARGS__) : ((type(*)())h.addr)(__VA_ARGS__); \
-  kuKernelCpuUnrestrictedMemcpy((void *)h.addr, h.patch_instr, sizeof(h.patch_instr)); \
-  kuKernelFlushCaches((void *)h.addr, sizeof(h.patch_instr)); \
-  r; \
+    memcpy((void *)h.addr, h.orig_instr, sizeof(h.orig_instr)); \
+    __builtin___clear_cache((char *)h.addr, (char *)h.addr + sizeof(h.orig_instr)); \
+    type r = h.thumb_addr ? ((type(*)())h.thumb_addr)(__VA_ARGS__) : ((type(*)())h.addr)(__VA_ARGS__); \
+    memcpy((void *)h.addr, h.patch_instr, sizeof(h.patch_instr)); \
+    __builtin___clear_cache((char *)h.addr, (char *)h.addr + sizeof(h.patch_instr)); \
+    r; \
 })
 
 #endif
