@@ -17,7 +17,9 @@
 #include "FalsoJNI_Logger.h"
 #include "FalsoJNI.h"
 
-#include <psp2/kernel/clib.h>
+#include <stdio.h>
+#include <stdarg.h>
+#define sceClibPrintf printf
 #include <psp2/kernel/threadmgr.h>
 
 #define COLOR_RED     "\x1B[31m"
