@@ -1,0 +1,31 @@
+name: Build ARM32 Port
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Instalar compilador ARM32
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf cmake make
+
+    - name: Compilar
+      run: |
+        mkdir build
+        cd build
+        cmake -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++ ..
+        make || true
+
+    - name: Guardar ejecutable
+      uses: actions/upload-artifact@v4
+      with:
+        name: bbr-arm32-build
+        path: build/
