@@ -20,7 +20,8 @@
 #include <stdio.h>
 #include <stdarg.h>
 #define sceClibPrintf printf
-#include <psp2/kernel/threadmgr.h>
+#include <pthread.h>
+#define sceKernelGetThreadId() (uint32_t)pthread_self()
 
 #define COLOR_RED     "\x1B[31m"
 #define COLOR_ORANGE  "\x1B[33m"
