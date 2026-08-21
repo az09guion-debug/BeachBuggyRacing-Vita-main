@@ -6,21 +6,26 @@
  * of the MIT license.	See the LICENSE file for details.
  */
 
-#include <vitasdk.h>
-#include <kubridge.h>
-
-#include <psp2/kernel/clib.h>
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <sys/mman.h>
 
 #include "utils/dialog.h"
 #include "so_util.h"
 
-#ifndef SCE_KERNEL_MEMBLOCK_TYPE_USER_RX
-#define SCE_KERNEL_MEMBLOCK_TYPE_USER_RX                 (0x0C20D050)
+#ifndef ALIGN_MEM
+#define ALIGN_MEM(x, align) (((x) + ((align) - 1)) & ~((align) - 1))
 #endif
+
+typedef int SceUID;
+
+#define sceClibPrintf printf
+#define sceClibMemcpy memcpy
+#define kuKernelCpuUnrestrictedMemcpy(dst, src, sz) memcpy(dst, src, sz)
+#define kuKernelFlushCaches(addr, sz) __builtin___clear_cache((char *)(addr), (char *)(addr) + (sz))
 
 typedef struct b_enc {
     union {
@@ -62,39 +67,38 @@ static so_module *head = NULL, *tail = NULL;
 
 so_hook hook_thumb(uintptr_t addr, uintptr_t dst) {
     so_hook h;
-    sceClibPrintf("THUMB HOOK\n");
+    printf("THUMB HOOK\n");
     if (addr == 0)
         return h;
     h.thumb_addr = addr;
     addr &= ~1;
     if (addr & 2) {
         uint16_t nop = 0xbf00;
-        kuKernelCpuUnrestrictedMemcpy((void *)addr, &nop, sizeof(nop));
+        memcpy((void *)addr, &nop, sizeof(nop));
         addr += 2;
-        sceClibPrintf("THUMB UNALIGNED\n");
+        printf("THUMB UNALIGNED\n");
     }
 
     h.addr = addr;
     h.patch_instr[0] = 0xf000f8df; // LDR PC, [PC]
     h.patch_instr[1] = dst;
-    kuKernelCpuUnrestrictedMemcpy(&h.orig_instr, (void *)addr, sizeof(h.orig_instr));
-    kuKernelCpuUnrestrictedMemcpy((void *)addr, h.patch_instr, sizeof(h.patch_instr));
+    memcpy(&h.orig_instr, (void *)addr, sizeof(h.orig_instr));
+    memcpy((void *)addr, h.patch_instr, sizeof(h.patch_instr));
 
     return h;
 }
 
 so_hook hook_arm(uintptr_t addr, uintptr_t dst) {
     so_hook h;
-    sceClibPrintf("ARM HOOK\n");
+    printf("ARM HOOK\n");
     if (addr == 0)
         return h;
-    uint32_t hook[2];
     h.thumb_addr = 0;
     h.addr = addr;
     h.patch_instr[0] = 0xe51ff004; // LDR PC, [PC, #-0x4]
     h.patch_instr[1] = dst;
-    kuKernelCpuUnrestrictedMemcpy(&h.orig_instr, (void *)addr, sizeof(h.orig_instr));
-    kuKernelCpuUnrestrictedMemcpy((void *)addr, h.patch_instr, sizeof(h.patch_instr));
+    memcpy(&h.orig_instr, (void *)addr, sizeof(h.orig_instr));
+    memcpy((void *)addr, h.patch_instr, sizeof(h.patch_instr));
 
     return h;
 }
@@ -112,7 +116,7 @@ so_hook hook_addr(uintptr_t addr, uintptr_t dst) {
 }
 
 void so_flush_caches(so_module *mod) {
-    kuKernelFlushCaches((void *)mod->text_base, mod->text_size);
+    __builtin___clear_cache((char *)mod->text_base, (char *)(mod->text_base + mod->text_size));
 }
 
 int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_addr) {
@@ -132,48 +136,36 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
 
     for (int i = 0; i < mod->ehdr->e_phnum; i++) {
         if (mod->phdr[i].p_type == PT_LOAD) {
-            void *prog_data;
-            size_t prog_size;
+            void *prog_data = NULL;
+            size_t prog_size = 0;
 
             if ((mod->phdr[i].p_flags & PF_X) == PF_X) {
-                // Allocate arena for code patches, trampolines, etc
-                // Sits exactly under the desired allocation space
                 mod->patch_size = ALIGN_MEM(PATCH_SZ, mod->phdr[i].p_align);
-                SceKernelAllocMemBlockKernelOpt opt;
-                memset(&opt, 0, sizeof(SceKernelAllocMemBlockKernelOpt));
-                opt.size = sizeof(SceKernelAllocMemBlockKernelOpt);
-                opt.attr = 0x1;
-                opt.field_C = (SceUInt32)load_addr - mod->patch_size;
-                res = mod->patch_blockid = kuKernelAllocMemBlock("rx_block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RX, mod->patch_size, &opt);
-                if (res < 0)
+                
+                void *patch_ptr = mmap(NULL, mod->patch_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+                if (patch_ptr == MAP_FAILED)
                     goto err_free_so;
 
-                sceKernelGetMemBlockBase(mod->patch_blockid, (void **) &mod->patch_base);
+                mod->patch_base = (uintptr_t)patch_ptr;
                 mod->patch_head = mod->patch_base;
 
                 prog_size = ALIGN_MEM(mod->phdr[i].p_memsz, mod->phdr[i].p_align);
-                memset(&opt, 0, sizeof(SceKernelAllocMemBlockKernelOpt));
-                opt.size = sizeof(SceKernelAllocMemBlockKernelOpt);
-                opt.attr = 0x1;
-                opt.field_C = (SceUInt32)load_addr;
-                res = mod->text_blockid = kuKernelAllocMemBlock("rx_block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RX, prog_size, &opt);
-                if (res < 0)
+                
+                void *text_ptr = mmap(NULL, prog_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+                if (text_ptr == MAP_FAILED)
                     goto err_free_so;
 
-                sceKernelGetMemBlockBase(mod->text_blockid, &prog_data);
-
+                prog_data = text_ptr;
                 mod->phdr[i].p_vaddr += (Elf32_Addr)prog_data;
 
                 mod->text_base = mod->phdr[i].p_vaddr;
                 mod->text_size = mod->phdr[i].p_memsz;
 
-                // Use the .text segment padding as a code cave
-                // Word-align it to make it simpler for instruction arena allocation
                 mod->cave_size = ALIGN_MEM(prog_size - mod->phdr[i].p_memsz, 0x4);
                 mod->cave_base = mod->cave_head = (uintptr_t) prog_data + mod->phdr[i].p_memsz;
                 mod->cave_base = ALIGN_MEM(mod->cave_base, 0x4);
                 mod->cave_head = mod->cave_base;
-                sceClibPrintf("code cave: %d bytes (@0x%08X).\n", mod->cave_size, mod->cave_base);
+                printf("code cave: %zu bytes (@0x%08X).\n", mod->cave_size, (unsigned int)mod->cave_base);
 
                 data_addr = (uintptr_t)prog_data + prog_size;
             } else {
@@ -185,16 +177,11 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
 
                 prog_size = ALIGN_MEM(mod->phdr[i].p_memsz + mod->phdr[i].p_vaddr - (data_addr - mod->text_base), mod->phdr[i].p_align);
 
-                SceKernelAllocMemBlockKernelOpt opt;
-                memset(&opt, 0, sizeof(SceKernelAllocMemBlockKernelOpt));
-                opt.size = sizeof(SceKernelAllocMemBlockKernelOpt);
-                opt.attr = 0x1;
-                opt.field_C = (SceUInt32)data_addr;
-                res = mod->data_blockid[mod->n_data] = kuKernelAllocMemBlock("rw_block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, prog_size, &opt);
-                if (res < 0)
+                void *data_ptr = mmap(NULL, prog_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+                if (data_ptr == MAP_FAILED)
                     goto err_free_text;
 
-                sceKernelGetMemBlockBase(mod->data_blockid[mod->n_data], &prog_data);
+                prog_data = data_ptr;
                 data_addr = (uintptr_t)prog_data + prog_size;
 
                 mod->phdr[i].p_vaddr += (Elf32_Addr)mod->text_base;
@@ -204,12 +191,13 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
                 mod->n_data++;
             }
 
-            char *zero = malloc(prog_size - mod->phdr[i].p_filesz);
-            memset(zero, 0, prog_size - mod->phdr[i].p_filesz);
-            kuKernelCpuUnrestrictedMemcpy(prog_data + mod->phdr[i].p_filesz, zero, prog_size - mod->phdr[i].p_filesz);
-            free(zero);
+            char *zero = calloc(1, prog_size - mod->phdr[i].p_filesz);
+            if (zero) {
+                memcpy((void *)((uintptr_t)prog_data + mod->phdr[i].p_filesz), zero, prog_size - mod->phdr[i].p_filesz);
+                free(zero);
+            }
 
-            kuKernelCpuUnrestrictedMemcpy((void *)mod->phdr[i].p_vaddr, (void *)((uintptr_t)so_data + mod->phdr[i].p_offset), mod->phdr[i].p_filesz);
+            memcpy((void *)mod->phdr[i].p_vaddr, (void *)((uintptr_t)so_data + mod->phdr[i].p_offset), mod->phdr[i].p_filesz);
         }
     }
 
@@ -258,8 +246,6 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
         }
     }
 
-    sceKernelFreeMemBlock(so_blockid);
-
     if (!head && !tail) {
         head = mod;
         tail = mod;
@@ -270,56 +256,50 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
 
     return 0;
 
-    err_free_data:
-    for (int i = 0; i < mod->n_data; i++)
-        sceKernelFreeMemBlock(mod->data_blockid[i]);
-    err_free_text:
-    sceKernelFreeMemBlock(mod->text_blockid);
-    err_free_so:
-    sceKernelFreeMemBlock(so_blockid);
-
+err_free_data:
+    for (int i = 0; i < mod->n_data; i++) {
+        if (mod->data_base[i])
+            munmap((void *)mod->data_base[i], mod->data_size[i]);
+    }
+err_free_text:
+    if (mod->text_base)
+        munmap((void *)mod->text_base, mod->text_size);
+err_free_so:
     return res;
 }
 
 int so_mem_load(so_module *mod, void *buffer, size_t so_size, uintptr_t load_addr) {
-    SceUID so_blockid;
-    void *so_data;
-
     memset(mod, 0, sizeof(so_module));
-
-    so_blockid = sceKernelAllocMemBlock("so block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, (so_size + 0xfff) & ~0xfff, NULL);
-    if (so_blockid < 0)
-        return so_blockid;
-
-    sceKernelGetMemBlockBase(so_blockid, &so_data);
-    sceClibMemcpy(so_data, buffer, so_size);
-
-    return _so_load(mod, so_blockid, so_data, load_addr);
+    return _so_load(mod, 0, buffer, load_addr);
 }
 
 int so_file_load(so_module *mod, const char *filename, uintptr_t load_addr) {
-    SceUID so_blockid;
-    void *so_data;
-
     memset(mod, 0, sizeof(so_module));
 
-    SceUID fd = sceIoOpen(filename, SCE_O_RDONLY, 0);
-    if (fd < 0)
-        return fd;
+    FILE *fd = fopen(filename, "rb");
+    if (!fd)
+        return -1;
 
-    size_t so_size = sceIoLseek(fd, 0, SCE_SEEK_END);
-    sceIoLseek(fd, 0, SCE_SEEK_SET);
+    fseek(fd, 0, SEEK_END);
+    size_t so_size = ftell(fd);
+    fseek(fd, 0, SEEK_SET);
 
-    so_blockid = sceKernelAllocMemBlock("so block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, (so_size + 0xfff) & ~0xfff, NULL);
-    if (so_blockid < 0)
-        return so_blockid;
+    void *so_data = malloc(so_size);
+    if (!so_data) {
+        fclose(fd);
+        return -1;
+    }
 
-    sceKernelGetMemBlockBase(so_blockid, &so_data);
+    if (fread(so_data, 1, so_size, fd) != so_size) {
+        fclose(fd);
+        free(so_data);
+        return -1;
+    }
+    fclose(fd);
 
-    sceIoRead(fd, so_data, so_size);
-    sceIoClose(fd);
-
-    return _so_load(mod, so_blockid, so_data, load_addr);
+    int res = _so_load(mod, 0, so_data, load_addr);
+    free(so_data);
+    return res;
 }
 
 int so_relocate(so_module *mod) {
@@ -334,19 +314,19 @@ int so_relocate(so_module *mod) {
             case R_ARM_ABS32:
                 if (sym->st_shndx != SHN_UNDEF) {
                     val = *ptr + mod->text_base + sym->st_value;
-                    kuKernelCpuUnrestrictedMemcpy(ptr, &val, sizeof(uintptr_t));
+                    memcpy(ptr, &val, sizeof(uintptr_t));
                 }
                 break;
             case R_ARM_RELATIVE:
                 val = *ptr + mod->text_base;
-                kuKernelCpuUnrestrictedMemcpy(ptr, &val, sizeof(uintptr_t));
+                memcpy(ptr, &val, sizeof(uintptr_t));
                 break;
             case R_ARM_GLOB_DAT:
             case R_ARM_JUMP_SLOT:
             {
                 if (sym->st_shndx != SHN_UNDEF) {
                     val = mod->text_base + sym->st_value;
-                    kuKernelCpuUnrestrictedMemcpy(ptr, &val, sizeof(uintptr_t));
+                    memcpy(ptr, &val, sizeof(uintptr_t));
                 }
                 break;
             }
@@ -386,12 +366,11 @@ uintptr_t so_resolve_link(so_module *mod, const char *symbol) {
 
 void reloc_err(uintptr_t got0)
 {
-    // Find to which module this missing symbol belongs
     int found = 0;
     so_module *curr = head;
     while (curr && !found) {
         for (int i = 0; i < curr->n_data; i++)
-            if ((got0 >= curr->data_base[i]) && (got0 <= (uintptr_t)(curr->data_base[i] + curr->data_size)))
+            if ((got0 >= curr->data_base[i]) && (got0 <= (uintptr_t)(curr->data_base[i] + curr->data_size[i])))
                 found = 1;
 
         if (!found)
@@ -399,7 +378,6 @@ void reloc_err(uintptr_t got0)
     }
 
     if (curr) {
-        // Attempt to find symbol name and then display error
         for (int i = 0; i < curr->num_reldyn + curr->num_relplt; i++) {
             Elf32_Rel *rel = i < curr->num_reldyn ? &curr->reldyn[i] : &curr->relplt[i - curr->num_reldyn];
             Elf32_Sym *sym = &curr->dynsym[ELF32_R_SYM(rel->r_info)];
@@ -418,7 +396,6 @@ void reloc_err(uintptr_t got0)
         }
     }
 
-    // Ooops, this shouldn't have happened.
     fatal_error("Unknown symbol \"???\" (%p).\n", (void*)got0);
 }
 
@@ -446,13 +423,13 @@ int so_resolve(so_module *mod, so_default_dynlib *default_dynlib, int size_defau
                     if (!default_dynlib_only) {
                         uintptr_t link = so_resolve_link(mod, mod->dynstr + sym->st_name);
                         if (link) {
-                            sceClibPrintf("Resolved from dependencies: %s\n", mod->dynstr + sym->st_name);
+                            printf("Resolved from dependencies: %s\n", mod->dynstr + sym->st_name);
                             if (type == R_ARM_ABS32) {
                                 val = *ptr + link;
-                                kuKernelCpuUnrestrictedMemcpy(ptr, &val, sizeof(uintptr_t));
+                                memcpy(ptr, &val, sizeof(uintptr_t));
                             } else {
                                 val = link;
-                                kuKernelCpuUnrestrictedMemcpy(ptr, &val, sizeof(uintptr_t));
+                                memcpy(ptr, &val, sizeof(uintptr_t));
                             }
                             resolved = 1;
                         }
@@ -461,7 +438,7 @@ int so_resolve(so_module *mod, so_default_dynlib *default_dynlib, int size_defau
                     for (int j = 0; j < size_default_dynlib / sizeof(so_default_dynlib); j++) {
                         if (strcmp(mod->dynstr + sym->st_name, default_dynlib[j].symbol) == 0) {
                             val = default_dynlib[j].func;
-                            kuKernelCpuUnrestrictedMemcpy(ptr, &val, sizeof(uintptr_t));
+                            memcpy(ptr, &val, sizeof(uintptr_t));
                             resolved = 1;
                             break;
                         }
@@ -469,11 +446,11 @@ int so_resolve(so_module *mod, so_default_dynlib *default_dynlib, int size_defau
 
                     if (!resolved) {
                         if (type == R_ARM_JUMP_SLOT) {
-                            sceClibPrintf("Unresolved import: %s\n", mod->dynstr + sym->st_name);
+                            printf("Unresolved import: %s\n", mod->dynstr + sym->st_name);
                             *ptr = (uintptr_t)&plt0_stub;
                         }
                         else {
-                            sceClibPrintf("Unresolved import: %s\n", mod->dynstr + sym->st_name);
+                            printf("Unresolved import: %s\n", mod->dynstr + sym->st_name);
                         }
                     }
                 }
@@ -566,19 +543,11 @@ static int so_symbol_index(so_module *mod, const char *symbol)
     return -1;
 }
 
-/*
- * alloc_arena: allocates space on either patch or cave arenas,
- * range: maximum range from allocation to dst (ignored if NULL)
- * dst: destination address
-*/
 uintptr_t so_alloc_arena(so_module *so, uintptr_t range, uintptr_t dst, size_t sz) {
-    // Is address in range?
 #define inrange(lsr, gtr, range) \
-		(((uintptr_t)(range) == (uintptr_t)NULL) || ((uintptr_t)(range) >= ((uintptr_t)(gtr) - (uintptr_t)(lsr))))
-    // Space left on block
+        (((uintptr_t)(range) == (uintptr_t)NULL) || ((uintptr_t)(range) >= ((uintptr_t)(gtr) - (uintptr_t)(lsr))))
 #define blkavail(type) (so->type##_size - (so->type##_head - so->type##_base))
 
-    // keep allocations 4-byte aligned for simplicity
     sz = ALIGN_MEM(sz, 4);
 
     if (sz <= (blkavail(patch)) && inrange(so->patch_base, dst, range)) {
@@ -604,8 +573,6 @@ static void trampoline_ldm(so_module *mod, uint32_t *dst) {
     uint32_t stored = (uint32_t) NULL;
     for (int i = 0; i < 16; i++) {
         if (bitMask & (1 << i)) {
-            // If the register we're reading the offset from is the same as the one we're writing,
-            // delay it to the very end so that the base pointer ins't clobbered
             if (baseReg == i)
                 stored = LDR_OFFS(i, baseReg, cur).raw;
             else
@@ -614,7 +581,6 @@ static void trampoline_ldm(so_module *mod, uint32_t *dst) {
         }
     }
 
-    // Perform the delayed load if needed
     if (stored) {
         *ptr++ = stored;
     }
@@ -622,18 +588,17 @@ static void trampoline_ldm(so_module *mod, uint32_t *dst) {
     *ptr++ = (uint32_t) 0xe51ff004; // LDR PC, [PC, -0x4] ; jmp to [dst+0x4]
     *ptr++ = (uint32_t) dst+1; // .dword <...>	; [dst+0x4]
 
-    size_t trampoline_sz =	((uintptr_t)ptr - (uintptr_t)&funct[0]);
+    size_t trampoline_sz = ((uintptr_t)ptr - (uintptr_t)&funct[0]);
     uintptr_t patch_addr = so_alloc_arena(mod, B_RANGE, (uintptr_t) B_OFFSET(dst), trampoline_sz);
 
     if (!patch_addr) {
-        fatal_error("Failed to patch LDMIA at 0x%08X, unable to allocate space.\n", dst);
+        fatal_error("Failed to patch LDMIA at 0x%08X, unable to allocate space.\n", (unsigned int)(uintptr_t)dst);
     }
 
-    // Create sign extended relative address rel_addr
     trampoline[0] = B(dst, patch_addr).raw;
 
-    kuKernelCpuUnrestrictedMemcpy((void*)patch_addr, funct, trampoline_sz);
-    kuKernelCpuUnrestrictedMemcpy(dst, trampoline, sizeof(trampoline));
+    memcpy((void*)patch_addr, funct, trampoline_sz);
+    memcpy(dst, trampoline, sizeof(trampoline));
 }
 
 uintptr_t so_symbol(so_module *mod, const char *symbol) {
@@ -645,12 +610,6 @@ uintptr_t so_symbol(so_module *mod, const char *symbol) {
 }
 
 void so_symbol_fix_ldmia(so_module *mod, const char *symbol) {
-    // This is meant to work around crashes due to unaligned accesses (SIGBUS :/) due to certain
-    // kernels not having the fault trap enabled, e.g. certain RK3326 Odroid Go Advance clone distros.
-    // TODO:: Maybe enable this only with a config flag? maybe with a list of known broken functions?
-    // Known to trigger on GM:S's "_Z11Shader_LoadPhjS_" - if it starts happening on other places,
-    // might be worth enabling it globally.
-
     int idx = so_symbol_index(mod, symbol);
     if (idx == -1)
         return;
@@ -659,9 +618,8 @@ void so_symbol_fix_ldmia(so_module *mod, const char *symbol) {
     for (uintptr_t addr = st_addr; addr < st_addr + mod->dynsym[idx].st_size; addr+=4) {
         uint32_t inst = *(uint32_t*)(addr);
 
-        //Is this an LDMIA instruction with a R0-R12 base register?
         if (((inst & 0xFFF00000) == 0xE8900000) && (((inst >> 16) & 0xF) < 13) ) {
-            sceClibPrintf("Found possibly misaligned LDMIA on 0x%08X, trying to fix it... (instr: 0x%08X, to 0x%08X)\n", addr, *(uint32_t*)addr, mod->patch_head);
+            printf("Found possibly misaligned LDMIA on 0x%08X, trying to fix it... (instr: 0x%08X, to 0x%08X)\n", (unsigned int)addr, *(uint32_t*)addr, (unsigned int)mod->patch_head);
             trampoline_ldm(mod, (uint32_t *) addr);
         }
     }
