@@ -1,6 +1,6 @@
 /*
- * Copyright (C) 2021      Andy Nguyen
- * Copyright (C) 2021      Rinnegatamante
+ * Copyright (C) 2021     Andy Nguyen
+ * Copyright (C) 2021     Rinnegatamante
  * Copyright (C) 2022-2023 Volodymyr Atamanenko
  *
  * This software may be modified and distributed under the terms
@@ -15,7 +15,8 @@
 #ifndef SOLOADER_GLUTIL_H
 #define SOLOADER_GLUTIL_H
 
-#include <vitaGL.h>
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
 
 #ifdef __cplusplus
 extern "C" {
